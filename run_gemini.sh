@@ -30,7 +30,7 @@ echo "تفعيل بيئة 'base'..."
 source /home/unitree/miniconda3/bin/activate base
 
 # 3. إضافة مفتاح API
-export GEMINI_API_KEY="AIzaSyB8B1AkhWJSq4sNr-Pk8KsVfkxTbuV7kyo"
+export GEMINI_API_KEY="GEMINI_API_KEY"
 
 # 4. حلقة لا نهائية لإعادة تشغيل السكربت
 echo "=== بدء حلقة إعادة التشغيل التلقائي ==="

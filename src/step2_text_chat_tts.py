@@ -1,21 +1,24 @@
 import argparse
 import os
-import re
 import shutil
+import signal
 import subprocess
+import tempfile
 import threading
 import time
-from datetime import datetime
 from pathlib import Path
 
+from faster_whisper import WhisperModel
 from openai import OpenAI
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize
 from unitree_sdk2py.g1.arm.g1_arm_action_client import G1ArmActionClient, action_map
 
 
-SYSTEM_PROMPT = "You are a helpful humanoid robot assistant and your name id Eddy. Keep replies concise and natural for speech."
+SYSTEM_PROMPT = "You are a helpful humanoid robot assistant. Keep replies concise and natural for speech."
 DEFAULT_SINK = "alsa_output.usb-Anker_PowerConf_A3321-DEV-SN1-01.iec958-stereo"
+DEFAULT_SOURCE = "alsa_input.usb-Anker_PowerConf_A3321-DEV-SN1-01.mono-fallback"
 DEFAULT_NET_IF = "enP8p1s0"
+DEFAULT_AUDIO_DEVICE = "plughw:0,0"
 
 
 class ArmGestureController:
@@ -75,11 +78,6 @@ def ask_chat(client: OpenAI, model: str, system_prompt: str, user_text: str) -> 
     return (resp.choices[0].message.content or "").strip()
 
 
-def sanitize_filename(text: str) -> str:
-    text = re.sub(r"[^a-zA-Z0-9_-]+", "_", text).strip("_")
-    return text[:40] or "reply"
-
-
 def _save_audio_response(audio_resp, out_path: Path) -> None:
     if hasattr(audio_resp, "stream_to_file"):
         audio_resp.stream_to_file(str(out_path))
@@ -94,8 +92,6 @@ def _save_audio_response(audio_resp, out_path: Path) -> None:
 
 
 def tts_to_wav(client: OpenAI, model: str, voice: str, text: str, out_path: Path) -> Path:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
     kwargs = {"model": model, "voice": voice, "input": text}
     try:
         audio_resp = client.audio.speech.create(**kwargs, response_format="wav")
@@ -130,6 +126,18 @@ def play_wav(path: Path, sink: str | None) -> None:
     raise RuntimeError("No playback tool found. Install pulseaudio-utils (paplay) or alsa-utils (aplay).")
 
 
+def set_default_pulse_source(source: str) -> None:
+    if not shutil.which("pactl"):
+        print("[audio] pactl not found; skipping default source setup")
+        return
+    proc = subprocess.run(["pactl", "set-default-source", source], capture_output=True, text=True)
+    if proc.returncode != 0:
+        msg = proc.stderr.strip() or proc.stdout.strip()
+        print(f"[audio] failed to set source '{source}': {msg}")
+        return
+    print(f"[audio] default source set: {source}")
+
+
 def start_motion_thread(motion: ArmGestureController, gesture: str) -> threading.Thread:
     def _run_motion() -> None:
         try:
@@ -142,44 +150,98 @@ def start_motion_thread(motion: ArmGestureController, gesture: str) -> threading
     return t
 
 
+def record_wav_push_to_talk(device: str, sample_rate: int, channels: int) -> Path:
+    tmp = tempfile.NamedTemporaryFile(prefix="g1_stt_", suffix=".wav", delete=False)
+    wav_path = Path(tmp.name)
+    tmp.close()
+
+    cmd = [
+        "arecord",
+        "-D",
+        device,
+        "-f",
+        "S16_LE",
+        "-r",
+        str(sample_rate),
+        "-c",
+        str(channels),
+        str(wav_path),
+    ]
+
+    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    print("Recording... press Enter to stop.")
+    input()
+
+    if proc.poll() is None:
+        proc.send_signal(signal.SIGINT)
+    proc.wait(timeout=3)
+
+    return wav_path
+
+
+def transcribe_wav(stt_model: WhisperModel, wav_path: Path) -> str:
+    segments, _ = stt_model.transcribe(str(wav_path), language="en")
+    return "".join(segment.text for segment in segments).strip()
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Step 2: text input -> ChatGPT -> OpenAI TTS -> speaker")
+    parser = argparse.ArgumentParser(description="Push-to-talk STT -> ChatGPT -> OpenAI TTS -> Motion")
     parser.add_argument("--chat-model", default="gpt-4o-mini")
     parser.add_argument("--tts-model", default="gpt-4o-mini-tts")
     parser.add_argument("--voice", default="alloy")
     parser.add_argument("--sink", default=DEFAULT_SINK, help="Pulse sink name for paplay")
+    parser.add_argument("--source", default=DEFAULT_SOURCE, help="Pulse source name for microphone")
     parser.add_argument("--net-if", default=DEFAULT_NET_IF, help="Network interface for Unitree SDK")
-    parser.add_argument("--no-play", action="store_true", help="Generate TTS file but do not play it")
-    parser.add_argument("--artifacts-dir", default="artifacts")
+    parser.add_argument("--audio-device", default=DEFAULT_AUDIO_DEVICE, help="ALSA capture device for arecord")
+    parser.add_argument("--sample-rate", type=int, default=16000)
+    parser.add_argument("--channels", type=int, default=1)
+    parser.add_argument("--whisper-model", default="base", help="faster-whisper model name")
+    parser.add_argument("--whisper-compute-type", default="int8", help="faster-whisper compute_type")
+    parser.add_argument("--no-play", action="store_true", help="Skip speaker playback")
     args = parser.parse_args()
 
     if not os.getenv("OPENAI_API_KEY"):
         raise RuntimeError("OPENAI_API_KEY is not set.")
 
+    set_default_pulse_source(args.source)
+
     client = OpenAI()
     motion = ArmGestureController(net_if=args.net_if)
-    artifacts_dir = Path(args.artifacts_dir)
-    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    stt_model = WhisperModel(args.whisper_model, compute_type=args.whisper_compute_type)
 
-    print("Step 2: Text Chat + TTS + Motion")
-    if args.sink:
-        print(f"Playback sink: {args.sink}")
-    print("Commands: type your message, or q to quit.")
+    print("Step 2: Push-to-talk STT + ChatGPT + TTS + Motion")
+    print(f"Playback sink: {args.sink}")
+    print(f"Mic source: {args.source}")
+    print(f"Mic device: {args.audio_device}")
+    print("[note] arecord uses ALSA device directly; Pulse source affects pulse clients, not arecord.")
+    print("Press Enter to start recording, Enter again to stop. Type q to quit.")
 
     while True:
         try:
-            user_text = input("you> ").strip()
+            cmd = input("> ").strip().lower()
         except (KeyboardInterrupt, EOFError):
             print("\nExit.")
             break
 
-        if user_text.lower() in {"q", "quit", "exit"}:
+        if cmd in {"q", "quit", "exit"}:
             print("Exit.")
             break
-        if not user_text:
-            continue
 
+        wav_in = None
+        wav_tts = None
         try:
+            wav_in = record_wav_push_to_talk(
+                device=args.audio_device,
+                sample_rate=args.sample_rate,
+                channels=args.channels,
+            )
+
+            user_text = transcribe_wav(stt_model, wav_in)
+            if not user_text:
+                print("user> [empty]")
+                continue
+
+            print(f"user> {user_text}")
             reply = ask_chat(client, args.chat_model, SYSTEM_PROMPT, user_text)
             if not reply:
                 print("robot> [empty reply]")
@@ -189,25 +251,22 @@ def main() -> None:
             gesture = map_gesture(reply)
             motion_thread = start_motion_thread(motion, gesture)
 
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            base = sanitize_filename(reply)
-            wav_path = artifacts_dir / f"tts_{ts}_{base}.wav"
-            tts_to_wav(client, args.tts_model, args.voice, reply, wav_path)
+            with tempfile.NamedTemporaryFile(prefix="g1_tts_", suffix=".wav", delete=False) as tmp_tts:
+                wav_tts = Path(tmp_tts.name)
 
+            tts_to_wav(client, args.tts_model, args.voice, reply, wav_tts)
             if not args.no_play:
-                try:
-                    play_wav(wav_path, args.sink)
-                finally:
-                    if wav_path.exists():
-                        wav_path.unlink()
-                        print(f"[tts] deleted {wav_path}")
-            else:
-                print(f"[tts] saved {wav_path}")
+                play_wav(wav_tts, args.sink)
 
             motion_thread.join(timeout=0.1)
 
         except Exception as exc:
             print(f"Error: {exc}")
+        finally:
+            if wav_in and wav_in.exists():
+                wav_in.unlink()
+            if wav_tts and wav_tts.exists():
+                wav_tts.unlink()
 
 
 if __name__ == "__main__":
