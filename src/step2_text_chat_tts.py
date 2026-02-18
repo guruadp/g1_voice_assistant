@@ -3,6 +3,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -12,7 +13,7 @@ from unitree_sdk2py.core.channel import ChannelFactoryInitialize
 from unitree_sdk2py.g1.arm.g1_arm_action_client import G1ArmActionClient, action_map
 
 
-SYSTEM_PROMPT = "You are a helpful humanoid robot assistant. Keep replies concise and natural for speech."
+SYSTEM_PROMPT = "You are a helpful humanoid robot assistant and your name id Eddy. Keep replies concise and natural for speech."
 DEFAULT_SINK = "alsa_output.usb-Anker_PowerConf_A3321-DEV-SN1-01.iec958-stereo"
 DEFAULT_NET_IF = "enP8p1s0"
 
@@ -129,6 +130,18 @@ def play_wav(path: Path, sink: str | None) -> None:
     raise RuntimeError("No playback tool found. Install pulseaudio-utils (paplay) or alsa-utils (aplay).")
 
 
+def start_motion_thread(motion: ArmGestureController, gesture: str) -> threading.Thread:
+    def _run_motion() -> None:
+        try:
+            motion.execute(gesture)
+        except Exception as exc:
+            print(f"[motion] execution error: {exc}")
+
+    t = threading.Thread(target=_run_motion, daemon=True)
+    t.start()
+    return t
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Step 2: text input -> ChatGPT -> OpenAI TTS -> speaker")
     parser.add_argument("--chat-model", default="gpt-4o-mini")
@@ -174,16 +187,24 @@ def main() -> None:
 
             print(f"robot> {reply}")
             gesture = map_gesture(reply)
-            motion.execute(gesture)
+            motion_thread = start_motion_thread(motion, gesture)
 
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             base = sanitize_filename(reply)
             wav_path = artifacts_dir / f"tts_{ts}_{base}.wav"
             tts_to_wav(client, args.tts_model, args.voice, reply, wav_path)
-            print(f"[tts] saved {wav_path}")
 
             if not args.no_play:
-                play_wav(wav_path, args.sink)
+                try:
+                    play_wav(wav_path, args.sink)
+                finally:
+                    if wav_path.exists():
+                        wav_path.unlink()
+                        print(f"[tts] deleted {wav_path}")
+            else:
+                print(f"[tts] saved {wav_path}")
+
+            motion_thread.join(timeout=0.1)
 
         except Exception as exc:
             print(f"Error: {exc}")
