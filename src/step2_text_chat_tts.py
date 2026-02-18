@@ -1,5 +1,6 @@
 import argparse
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -13,7 +14,13 @@ from unitree_sdk2py.core.channel import ChannelFactoryInitialize
 from unitree_sdk2py.g1.arm.g1_arm_action_client import G1ArmActionClient, action_map
 
 
-SYSTEM_PROMPT = "You are a helpful humanoid robot assistant. Keep replies concise and natural for speech."
+SYSTEM_PROMPT = (
+    "You are Eddy, a friendly humanoid robot assistant. Speak naturally like a human in short spoken sentences. "
+    "You can physically perform these basic G1 arm actions: shake hand, high five, high wave, face wave, clap, "
+    "hug, hands up, heart, right hand up, x-ray, left kiss, right kiss, two-hand kiss, reject. "
+    "When the user asks for one of these actions, explicitly confirm you can do it and that you are doing it now. "
+    "Do not say you cannot physically do those supported actions."
+)
 DEFAULT_SINK = "alsa_output.usb-Anker_PowerConf_A3321-DEV-SN1-01.iec958-stereo"
 DEFAULT_SOURCE = "alsa_input.usb-Anker_PowerConf_A3321-DEV-SN1-01.mono-fallback"
 DEFAULT_NET_IF = "enP8p1s0"
@@ -77,7 +84,7 @@ def map_action_by_text(text: str) -> str | None:
         return "hands up"
     if any(k in t for k in ["heart", "love gesture"]):
         return "heart"
-    if any(k in t for k in ["reject", "no", "can't", "cannot", "refuse"]):
+    if re.search(r"\b(reject|no|can\'t|cannot|refuse)\b", t):
         return "reject"
     if any(k in t for k in ["right hand up"]):
         return "right hand up"
@@ -105,13 +112,42 @@ def choose_action(user_text: str, reply_text: str) -> str:
     return "high wave"
 
 
-def ask_chat(client: OpenAI, model: str, system_prompt: str, user_text: str) -> str:
+
+
+def action_phrase(action: str) -> str:
+    phrase_map = {
+        "shake hand": "a handshake",
+        "high five": "a high five",
+        "high wave": "a high wave",
+        "face wave": "a face wave",
+        "clap": "a clap",
+        "hug": "a hug",
+        "hands up": "hands up",
+        "heart": "a heart gesture",
+        "right hand up": "right hand up",
+        "x-ray": "an x-ray pose",
+        "left kiss": "a left kiss",
+        "right kiss": "a right kiss",
+        "two-hand kiss": "a two-hand kiss",
+        "reject": "a reject gesture",
+    }
+    return phrase_map.get(action, action)
+
+def ask_chat(client: OpenAI, model: str, system_prompt: str, user_text: str, requested_action: str | None = None) -> str:
+    messages = [{"role": "system", "content": system_prompt}]
+    if requested_action:
+        messages.append({
+            "role": "system",
+            "content": (
+                f"The user requested this supported action: {requested_action}. "
+                f"In your reply, explicitly confirm you can do it and that you are doing {action_phrase(requested_action)} now."
+            ),
+        })
+    messages.append({"role": "user", "content": user_text})
+
     resp = client.chat.completions.create(
         model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_text},
-        ],
+        messages=messages,
         temperature=0.4,
     )
     return (resp.choices[0].message.content or "").strip()
@@ -228,13 +264,15 @@ def _extract_transcript(resp) -> str:
 
 
 def transcribe_wav_openai(client: OpenAI, wav_path: Path, stt_model: str, language: str) -> str:
+    lang = (language or "auto").strip().lower()
+    kwargs = {"model": stt_model, "file": None}
+    if lang != "auto":
+        kwargs["language"] = lang
+
     with wav_path.open("rb") as f:
         try:
-            resp = client.audio.transcriptions.create(
-                model=stt_model,
-                file=f,
-                language=language,
-            )
+            kwargs["file"] = f
+            resp = client.audio.transcriptions.create(**kwargs)
             text = _extract_transcript(resp)
             if text:
                 return text
@@ -248,11 +286,10 @@ def transcribe_wav_openai(client: OpenAI, wav_path: Path, stt_model: str, langua
         return ""
 
     with wav_path.open("rb") as f:
-        resp = client.audio.transcriptions.create(
-            model="whisper-1",
-            file=f,
-            language=language,
-        )
+        fb_kwargs = {"model": "whisper-1", "file": f}
+        if lang != "auto":
+            fb_kwargs["language"] = lang
+        resp = client.audio.transcriptions.create(**fb_kwargs)
         return _extract_transcript(resp)
 
 
@@ -260,7 +297,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Push-to-talk STT -> ChatGPT -> OpenAI TTS -> Motion")
     parser.add_argument("--chat-model", default="gpt-4o-mini")
     parser.add_argument("--stt-model", default=DEFAULT_STT_MODEL)
-    parser.add_argument("--stt-language", default="en")
+    parser.add_argument("--stt-language", default="auto", help="STT language code (e.g. en, ar) or auto")
     parser.add_argument("--tts-model", default="gpt-4o-mini-tts")
     parser.add_argument("--voice", default="alloy")
     parser.add_argument("--sink", default=DEFAULT_SINK, help="Pulse sink name for paplay")
@@ -285,6 +322,7 @@ def main() -> None:
     print(f"Mic source: {args.source}")
     print(f"Mic device: {args.audio_device}")
     print(f"STT model: {args.stt_model}")
+    print(f"STT language: {args.stt_language}")
     print("[note] arecord uses ALSA device directly; Pulse source affects pulse clients, not arecord.")
     print("Press Enter to start recording, Enter again to stop. Type q to quit.")
 
@@ -314,7 +352,8 @@ def main() -> None:
                 continue
 
             print(f"user> {user_text}")
-            reply = ask_chat(client, args.chat_model, SYSTEM_PROMPT, user_text)
+            requested_action = map_action_by_text(user_text)
+            reply = ask_chat(client, args.chat_model, SYSTEM_PROMPT, user_text, requested_action=requested_action)
             if not reply:
                 print("robot> [empty reply]")
                 continue
