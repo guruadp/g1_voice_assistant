@@ -53,16 +53,55 @@ class ArmGestureController:
             time.sleep(0.35)
 
 
-def map_gesture(text: str) -> str:
+def map_action_by_text(text: str) -> str | None:
     t = text.lower()
-    if any(k in t for k in ["hi", "hello"]):
+
+    # Prioritized intent mapping aligned with g1_arm_action_nlu_llm_only.py action names.
+    if any(k in t for k in ["handshake", "shake hand", "shake hands"]):
+        return "shake hand"
+    if any(k in t for k in ["high five", "hi five"]):
+        return "high five"
+    if any(k in t for k in ["face wave"]):
+        return "face wave"
+    if any(k in t for k in ["high wave", "wave high"]):
+        return "high wave"
+    if any(k in t for k in ["wave", "hello", "hi"]):
         return "high wave"
     if any(k in t for k in ["thank", "thanks"]):
         return "face wave"
-    if any(k in t for k in ["great", "awesome", "nice", "happy"]):
-        return "high five"
-    if any(k in t for k in ["sorry", "cannot", "can't", "no"]):
+    if any(k in t for k in ["hug"]):
+        return "hug"
+    if any(k in t for k in ["clap"]):
+        return "clap"
+    if any(k in t for k in ["hands up", "raise hands", "put your hands up"]):
+        return "hands up"
+    if any(k in t for k in ["heart", "love gesture"]):
+        return "heart"
+    if any(k in t for k in ["reject", "no", "can't", "cannot", "refuse"]):
         return "reject"
+    if any(k in t for k in ["right hand up"]):
+        return "right hand up"
+    if any(k in t for k in ["x-ray", "xray"]):
+        return "x-ray"
+    if any(k in t for k in ["left kiss"]):
+        return "left kiss"
+    if any(k in t for k in ["right kiss"]):
+        return "right kiss"
+    if any(k in t for k in ["two-hand kiss", "two hand kiss"]):
+        return "two-hand kiss"
+    return None
+
+
+def choose_action(user_text: str, reply_text: str) -> str:
+    # User intent has priority over assistant wording.
+    action = map_action_by_text(user_text)
+    if action:
+        return action
+
+    action = map_action_by_text(reply_text)
+    if action:
+        return action
+
     return "high wave"
 
 
@@ -281,8 +320,9 @@ def main() -> None:
                 continue
 
             print(f"robot> {reply}")
-            gesture = map_gesture(reply)
-            motion_thread = start_motion_thread(motion, gesture)
+            action = choose_action(user_text, reply)
+            print(f"[motion] selected action: {action}")
+            motion_thread = start_motion_thread(motion, action)
 
             with tempfile.NamedTemporaryFile(prefix="g1_tts_", suffix=".wav", delete=False) as tmp_tts:
                 wav_tts = Path(tmp_tts.name)
