@@ -133,6 +133,24 @@ def action_phrase(action: str) -> str:
     }
     return phrase_map.get(action, action)
 
+ACTION_SPEECH_STYLE = {
+    "shake hand": "For handshake: invite the user to extend their hand and add a warm social line like 'nice to meet you'.",
+    "hug": "For hug: invite the user to come a little closer, in a kind and respectful tone.",
+    "high five": "For high five: use an upbeat line asking the user to raise their hand.",
+    "high wave": "For high wave: use a cheerful greeting line.",
+    "face wave": "For face wave: use a friendly polite line for thanks or hello.",
+    "clap": "For clap: use a celebratory line.",
+    "hands up": "For hands up: use a playful and safe instruction line.",
+    "heart": "For heart: use a warm affectionate line.",
+    "reject": "For reject: be polite, calm, and gentle in refusal wording.",
+}
+
+def action_style_hint(action: str | None) -> str:
+    if not action:
+        return ""
+    return ACTION_SPEECH_STYLE.get(action, "Use a natural human-like line that matches the action.")
+
+
 def ask_chat(client: OpenAI, model: str, system_prompt: str, user_text: str, requested_action: str | None = None) -> str:
     messages = [{"role": "system", "content": system_prompt}]
     if requested_action:
@@ -140,7 +158,9 @@ def ask_chat(client: OpenAI, model: str, system_prompt: str, user_text: str, req
             "role": "system",
             "content": (
                 f"The user requested this supported action: {requested_action}. "
-                f"In your reply, explicitly confirm you can do it and that you are doing {action_phrase(requested_action)} now."
+                f"In your reply, explicitly confirm you can do it and that you are doing {action_phrase(requested_action)} now. "
+                f"Style guidance: {action_style_hint(requested_action)} "
+                "Reply in 1-2 short spoken sentences. Sound warm and human, but do not use emoji."
             ),
         })
     messages.append({"role": "user", "content": user_text})
@@ -154,9 +174,6 @@ def ask_chat(client: OpenAI, model: str, system_prompt: str, user_text: str, req
 
 
 def _save_audio_response(audio_resp, out_path: Path) -> None:
-    if hasattr(audio_resp, "stream_to_file"):
-        audio_resp.stream_to_file(str(out_path))
-        return
     if hasattr(audio_resp, "write_to_file"):
         audio_resp.write_to_file(str(out_path))
         return
