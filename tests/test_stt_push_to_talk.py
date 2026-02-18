@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 import argparse
+import os
 import shutil
 import signal
 import subprocess
 import tempfile
 from pathlib import Path
 
-from faster_whisper import WhisperModel
+from openai import OpenAI
 
 DEFAULT_SOURCE = "alsa_input.usb-Anker_PowerConf_A3321-DEV-SN1-01.mono-fallback"
 DEFAULT_AUDIO_DEVICE = "plughw:0,0"
 DEFAULT_SAMPLE_RATE = 16000
 DEFAULT_CHANNELS = 1
-DEFAULT_WHISPER_MODEL = "base"
-DEFAULT_WHISPER_COMPUTE = "int8"
+DEFAULT_STT_MODEL = "gpt-4o-mini-transcribe"
 
 
 def set_default_pulse_source(source: str) -> None:
@@ -57,28 +57,65 @@ def record_wav_push_to_talk(device: str, sample_rate: int, channels: int) -> Pat
     return wav_path
 
 
-def transcribe_wav(stt_model: WhisperModel, wav_path: Path) -> str:
-    segments, _ = stt_model.transcribe(str(wav_path), language="en")
-    return "".join(segment.text for segment in segments).strip()
+def _extract_transcript(resp) -> str:
+    text = getattr(resp, "text", None)
+    if text:
+        return text.strip()
+    if isinstance(resp, dict):
+        return str(resp.get("text", "")).strip()
+    return ""
+
+
+def transcribe_wav_openai(client: OpenAI, wav_path: Path, stt_model: str, language: str) -> str:
+    with wav_path.open("rb") as f:
+        try:
+            resp = client.audio.transcriptions.create(
+                model=stt_model,
+                file=f,
+                language=language,
+            )
+            text = _extract_transcript(resp)
+            if text:
+                return text
+        except Exception as exc:
+            if stt_model != "whisper-1":
+                print(f"[stt] {stt_model} failed, retrying whisper-1: {exc}")
+            else:
+                raise
+
+    if stt_model == "whisper-1":
+        return ""
+
+    with wav_path.open("rb") as f:
+        resp = client.audio.transcriptions.create(
+            model="whisper-1",
+            file=f,
+            language=language,
+        )
+        return _extract_transcript(resp)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="STT-only push-to-talk test")
+    parser = argparse.ArgumentParser(description="STT-only push-to-talk test (OpenAI STT)")
     parser.add_argument("--source", default=DEFAULT_SOURCE, help="Pulse source name")
     parser.add_argument("--audio-device", default=DEFAULT_AUDIO_DEVICE, help="ALSA capture device")
     parser.add_argument("--sample-rate", type=int, default=DEFAULT_SAMPLE_RATE)
     parser.add_argument("--channels", type=int, default=DEFAULT_CHANNELS)
-    parser.add_argument("--whisper-model", default=DEFAULT_WHISPER_MODEL)
-    parser.add_argument("--whisper-compute-type", default=DEFAULT_WHISPER_COMPUTE)
+    parser.add_argument("--stt-model", default=DEFAULT_STT_MODEL)
+    parser.add_argument("--stt-language", default="en")
     parser.add_argument("--keep-wav", action="store_true", help="Keep recorded WAV files for debugging")
     args = parser.parse_args()
 
-    set_default_pulse_source(args.source)
-    stt_model = WhisperModel(args.whisper_model, compute_type=args.whisper_compute_type)
+    if not os.getenv("OPENAI_API_KEY"):
+        raise RuntimeError("OPENAI_API_KEY is not set.")
 
-    print("STT test ready")
+    set_default_pulse_source(args.source)
+    client = OpenAI()
+
+    print("STT test ready (OpenAI STT)")
     print(f"Source: {args.source}")
     print(f"Device: {args.audio_device}")
+    print(f"STT model: {args.stt_model}")
     print("Press Enter to start recording, Enter again to stop. Type q to quit.")
 
     while True:
@@ -95,7 +132,7 @@ def main() -> None:
         wav_path = None
         try:
             wav_path = record_wav_push_to_talk(args.audio_device, args.sample_rate, args.channels)
-            text = transcribe_wav(stt_model, wav_path)
+            text = transcribe_wav_openai(client, wav_path, args.stt_model, args.stt_language)
             if text:
                 print(f"stt> {text}")
             else:

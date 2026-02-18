@@ -8,7 +8,6 @@ import threading
 import time
 from pathlib import Path
 
-from faster_whisper import WhisperModel
 from openai import OpenAI
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize
 from unitree_sdk2py.g1.arm.g1_arm_action_client import G1ArmActionClient, action_map
@@ -19,6 +18,7 @@ DEFAULT_SINK = "alsa_output.usb-Anker_PowerConf_A3321-DEV-SN1-01.iec958-stereo"
 DEFAULT_SOURCE = "alsa_input.usb-Anker_PowerConf_A3321-DEV-SN1-01.mono-fallback"
 DEFAULT_NET_IF = "enP8p1s0"
 DEFAULT_AUDIO_DEVICE = "plughw:0,0"
+DEFAULT_STT_MODEL = "gpt-4o-mini-transcribe"
 
 
 class ArmGestureController:
@@ -179,14 +179,49 @@ def record_wav_push_to_talk(device: str, sample_rate: int, channels: int) -> Pat
     return wav_path
 
 
-def transcribe_wav(stt_model: WhisperModel, wav_path: Path) -> str:
-    segments, _ = stt_model.transcribe(str(wav_path), language="en")
-    return "".join(segment.text for segment in segments).strip()
+def _extract_transcript(resp) -> str:
+    text = getattr(resp, "text", None)
+    if text:
+        return text.strip()
+    if isinstance(resp, dict):
+        return str(resp.get("text", "")).strip()
+    return ""
+
+
+def transcribe_wav_openai(client: OpenAI, wav_path: Path, stt_model: str, language: str) -> str:
+    with wav_path.open("rb") as f:
+        try:
+            resp = client.audio.transcriptions.create(
+                model=stt_model,
+                file=f,
+                language=language,
+            )
+            text = _extract_transcript(resp)
+            if text:
+                return text
+        except Exception as exc:
+            if stt_model != "whisper-1":
+                print(f"[stt] {stt_model} failed, retrying whisper-1: {exc}")
+            else:
+                raise
+
+    if stt_model == "whisper-1":
+        return ""
+
+    with wav_path.open("rb") as f:
+        resp = client.audio.transcriptions.create(
+            model="whisper-1",
+            file=f,
+            language=language,
+        )
+        return _extract_transcript(resp)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Push-to-talk STT -> ChatGPT -> OpenAI TTS -> Motion")
     parser.add_argument("--chat-model", default="gpt-4o-mini")
+    parser.add_argument("--stt-model", default=DEFAULT_STT_MODEL)
+    parser.add_argument("--stt-language", default="en")
     parser.add_argument("--tts-model", default="gpt-4o-mini-tts")
     parser.add_argument("--voice", default="alloy")
     parser.add_argument("--sink", default=DEFAULT_SINK, help="Pulse sink name for paplay")
@@ -195,8 +230,6 @@ def main() -> None:
     parser.add_argument("--audio-device", default=DEFAULT_AUDIO_DEVICE, help="ALSA capture device for arecord")
     parser.add_argument("--sample-rate", type=int, default=16000)
     parser.add_argument("--channels", type=int, default=1)
-    parser.add_argument("--whisper-model", default="base", help="faster-whisper model name")
-    parser.add_argument("--whisper-compute-type", default="int8", help="faster-whisper compute_type")
     parser.add_argument("--no-play", action="store_true", help="Skip speaker playback")
     args = parser.parse_args()
 
@@ -207,12 +240,12 @@ def main() -> None:
 
     client = OpenAI()
     motion = ArmGestureController(net_if=args.net_if)
-    stt_model = WhisperModel(args.whisper_model, compute_type=args.whisper_compute_type)
 
     print("Step 2: Push-to-talk STT + ChatGPT + TTS + Motion")
     print(f"Playback sink: {args.sink}")
     print(f"Mic source: {args.source}")
     print(f"Mic device: {args.audio_device}")
+    print(f"STT model: {args.stt_model}")
     print("[note] arecord uses ALSA device directly; Pulse source affects pulse clients, not arecord.")
     print("Press Enter to start recording, Enter again to stop. Type q to quit.")
 
@@ -236,7 +269,7 @@ def main() -> None:
                 channels=args.channels,
             )
 
-            user_text = transcribe_wav(stt_model, wav_in)
+            user_text = transcribe_wav_openai(client, wav_in, args.stt_model, args.stt_language)
             if not user_text:
                 print("user> [empty]")
                 continue
