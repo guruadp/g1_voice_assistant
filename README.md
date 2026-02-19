@@ -1,54 +1,65 @@
-# G1 Voice Assistant (Step-by-Step Build)
+# G1 Voice Assistant
 
-This project is built in small verified steps.
+Voice pipeline for G1:
+- push-to-talk recording (`arecord`)
+- STT (OpenAI)
+- chat response (OpenAI)
+- TTS playback (`paplay`/`aplay`)
+- arm gestures + locomotion commands
 
-Only Step 0 (audio sink/source routing) is referenced from `run_gemini.sh`.
+## Architecture
 
-## Step 0: Audio Routing (Pulse)
+Core modules in `src/`:
 
-List current default sink/source and available devices:
+- `src/main.py`
+  - Application entrypoint and orchestration loop.
+  - Wires audio, NLU, LLM, motion, and locomotion modules.
+- `src/config.py`
+  - Centralized constants and defaults (models, prompt, device defaults).
+- `src/audio_io.py`
+  - Pulse environment setup, sink/source defaults, WAV record/play helpers.
+- `src/nlu.py`
+  - Text normalization and parsing for action/locomotion intents.
+- `src/llm.py`
+  - Chat request wrapper and compact spoken reply shaping.
+- `src/motion.py`
+  - `ArmGestureController` and custom arm motion process control.
+- `src/loco.py`
+  - Locomotion command execution (`apply_loco_commands`).
 
-```bash
-cd high_level/g1_voice_assistant
-python3 misc/step0_audio_route.py
-```
+Support/diagnostic scripts:
 
-Set explicit defaults:
+- `misc/step0_audio_route.py`: inspect/set Pulse sink/source.
+- `misc/step1_arecord_test.py`: standalone push-to-talk mic capture test.
 
-```bash
-python3 misc/step0_audio_route.py --sink <sink_name> --source <source_name>
-```
-
-## Step 1: Push-to-Talk Mic Capture (WIP)
-
-Current input flow:
-- `PyAudio` default input device
-- stream PCM chunks in memory
-- save final recording as WAV
-
-Run:
-
-```bash
-python3 misc/step1_arecord_test.py
-```
-
-## Step 2: Text Input -> ChatGPT -> OpenAI TTS
-
-This skips STT for now and validates dialog + speech + gesture hooks.
-
-Run:
+## Run
 
 ```bash
 python3 src/main.py
 ```
 
 Requirements:
-- `OPENAI_API_KEY` must be set.
-- Speaker route must be valid for `aplay`.
+- `OPENAI_API_KEY` is set.
+- Audio tools available (`arecord`, and either `paplay` or `aplay`).
 
 Useful flags:
 
 ```bash
 python3 src/main.py --no-play
 python3 src/main.py --voice alloy
+python3 src/main.py --chat-model gpt-4o-mini --tts-model gpt-4o-mini-tts
+```
+
+## Audio Setup Helpers
+
+Inspect current Pulse defaults/devices:
+
+```bash
+python3 misc/step0_audio_route.py
+```
+
+Set explicit Pulse defaults:
+
+```bash
+python3 misc/step0_audio_route.py --sink <sink_name> --source <source_name>
 ```
