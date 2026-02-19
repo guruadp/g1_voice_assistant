@@ -16,15 +16,10 @@ from audio_io import (
     set_default_pulse_source,
 )
 from nlu import (
-    contains_loco_hint,
-    choose_action,
-    has_negation,
-    is_explain_request,
-    is_explicit_action_request,
-    map_action_by_text,
+    parse_intent,
 )
 from llm import ask_chat, compact_spoken_reply
-from loco import apply_loco_commands
+from loco import apply_loco_plan
 from motion import ArmGestureController, start_motion_thread
 from config import (
     DEFAULT_AUDIO_DEVICE,
@@ -195,16 +190,23 @@ def main() -> None:
                 continue
 
             print(f"user> {user_text}")
-            requested_action = map_action_by_text(user_text)
-            requested_action_for_speech = requested_action if is_explicit_action_request(user_text, requested_action) else None
-            requested_locomotion = contains_loco_hint(user_text) and not has_negation(user_text)
+            intent, explain_motion_index = parse_intent(
+                user_text,
+                explain_index=explain_motion_index,
+                walk_speed=args.walk_speed,
+                lateral_speed=args.lateral_speed,
+                turn_speed=args.turn_speed,
+                default_duration=args.default_duration,
+                seconds_per_step=args.seconds_per_step,
+            )
+
             reply = ask_chat(
                 client,
                 args.chat_model,
                 SYSTEM_PROMPT,
                 user_text,
-                requested_action=requested_action_for_speech,
-                requested_locomotion=requested_locomotion,
+                requested_action=intent.speech_action,
+                requested_locomotion=bool(intent.loco_cmds),
                 history=history,
                 enable_web_search=not args.disable_web_search,
             )
@@ -218,18 +220,14 @@ def main() -> None:
             history.append({"role": "assistant", "content": reply})
             if len(history) > max_history_messages:
                 history = history[-max_history_messages:]
-            loco_only_request = requested_locomotion and requested_action_for_speech is None and not is_explain_request(user_text)
-            if loco_only_request:
-                action = None
-            else:
-                action, explain_motion_index = choose_action(user_text, reply, explain_motion_index)
+            action = intent.motion_action
 
             if action:
                 print(f"[motion] selected action: {action}")
 
             hold_action = action == "shake hand"
             is_custom_motion = bool(action and action.startswith("custom:"))
-            combo_loco_and_arm = bool(requested_locomotion and action and not is_custom_motion and not hold_action)
+            combo_loco_and_arm = bool(intent.loco_cmds and action and not is_custom_motion and not hold_action)
             motion_thread = None
             loco_thread = None
 
@@ -255,15 +253,15 @@ def main() -> None:
             if combo_loco_and_arm:
                 # For mixed command requests (e.g., walk + wave), run both together.
                 loco_thread = threading.Thread(
-                    target=apply_loco_commands,
-                    args=(user_text, loco, args),
+                    target=apply_loco_plan,
+                    args=(intent.loco_cmds, loco),
                     kwargs={"dry_run": args.dry_run},
                     daemon=True,
                 )
                 loco_thread.start()
                 motion_thread = start_motion_thread(motion, action, auto_release=True)
-            elif requested_locomotion:
-                apply_loco_commands(user_text, loco, args, dry_run=args.dry_run)
+            elif intent.loco_cmds:
+                apply_loco_plan(intent.loco_cmds, loco, dry_run=args.dry_run)
 
             if is_custom_motion:
                 graceful = motion.stop_custom_process(custom_proc)

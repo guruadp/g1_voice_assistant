@@ -10,7 +10,7 @@ from nlu import (
 
 
 def apply_loco_commands(text: str, loco_client: LocoClient | None, args, dry_run: bool = False) -> bool:
-    executed_any = False
+    loco_cmds: list[dict] = []
     for chunk in split_requests(text):
         if has_negation(chunk) and (contains_action_hint(chunk) or contains_loco_hint(chunk)):
             print(f"Skipped (negated): {chunk}")
@@ -26,7 +26,14 @@ def apply_loco_commands(text: str, loco_client: LocoClient | None, args, dry_run
         )
         if loco_cmd is None:
             continue
+        loco_cmds.append(loco_cmd)
 
+    return apply_loco_plan(loco_cmds, loco_client=loco_client, dry_run=dry_run)
+
+
+def apply_loco_plan(loco_cmds: list[dict], loco_client: LocoClient | None, dry_run: bool = False) -> bool:
+    executed_any = False
+    for loco_cmd in loco_cmds:
         vx = float(loco_cmd["vx"])
         vy = float(loco_cmd["vy"])
         omega = float(loco_cmd["omega"])

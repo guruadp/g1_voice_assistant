@@ -1,4 +1,5 @@
 import re
+from dataclasses import dataclass
 
 EXPLAIN_CUSTOM_ACTIONS = [
     "custom:explain_basic",
@@ -20,6 +21,14 @@ ACTION_SPEECH_STYLE = {
     "heart": "For heart: use a warm affectionate line.",
     "reject": "For reject: be polite, calm, and gentle in refusal wording.",
 }
+
+
+@dataclass
+class Intent:
+    speech_action: str | None
+    motion_action: str | None
+    loco_cmds: list[dict]
+    wants_explain: bool
 
 
 def map_action_by_text(text: str) -> str | None:
@@ -261,3 +270,46 @@ def action_style_hint(action: str | None) -> str:
     if not action:
         return ""
     return ACTION_SPEECH_STYLE.get(action, "Use a natural human-like line that matches the action.")
+
+
+def parse_intent(
+    text: str,
+    explain_index: int,
+    walk_speed: float,
+    lateral_speed: float,
+    turn_speed: float,
+    default_duration: float,
+    seconds_per_step: float,
+) -> tuple[Intent, int]:
+    requested_action = map_action_by_text(text)
+    speech_action = requested_action if is_explicit_action_request(text, requested_action) else None
+    wants_explain = is_explain_request(text)
+
+    loco_cmds: list[dict] = []
+    for chunk in split_requests(text):
+        if has_negation(chunk) and (contains_action_hint(chunk) or contains_loco_hint(chunk)):
+            continue
+        loco_cmd = parse_loco_command(
+            chunk,
+            walk_speed=walk_speed,
+            lateral_speed=lateral_speed,
+            turn_speed=turn_speed,
+            default_duration=default_duration,
+            seconds_per_step=seconds_per_step,
+        )
+        if loco_cmd is not None:
+            loco_cmds.append(loco_cmd)
+
+    loco_only_request = bool(loco_cmds) and speech_action is None and not wants_explain
+    if loco_only_request:
+        motion_action = None
+        next_explain_index = explain_index
+    else:
+        motion_action, next_explain_index = choose_action(text, "", explain_index)
+
+    return Intent(
+        speech_action=speech_action,
+        motion_action=motion_action,
+        loco_cmds=loco_cmds,
+        wants_explain=wants_explain,
+    ), next_explain_index
