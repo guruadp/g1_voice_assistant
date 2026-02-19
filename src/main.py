@@ -16,17 +16,15 @@ from audio_io import (
     set_default_pulse_source,
 )
 from nlu import (
-    contains_action_hint,
     contains_loco_hint,
     choose_action,
     has_negation,
     is_explain_request,
     is_explicit_action_request,
     map_action_by_text,
-    parse_loco_command,
-    split_requests,
 )
 from llm import ask_chat, compact_spoken_reply
+from loco import apply_loco_commands
 from motion import ArmGestureController, start_motion_thread
 
 
@@ -50,50 +48,6 @@ DEFAULT_NET_IF = "enP8p1s0"
 DEFAULT_AUDIO_DEVICE = "plughw:0,0"
 DEFAULT_STT_MODEL = "gpt-4o-mini-transcribe"
 CUSTOM_MOTION_RELEASE_SEC = 1.5
-
-
-
-def apply_loco_commands(text: str, loco_client: LocoClient | None, args, dry_run: bool = False) -> bool:
-    executed_any = False
-    for chunk in split_requests(text):
-        if has_negation(chunk) and (contains_action_hint(chunk) or contains_loco_hint(chunk)):
-            print(f"Skipped (negated): {chunk}")
-            continue
-
-        loco_cmd = parse_loco_command(
-            chunk,
-            walk_speed=args.walk_speed,
-            lateral_speed=args.lateral_speed,
-            turn_speed=args.turn_speed,
-            default_duration=args.default_duration,
-            seconds_per_step=args.seconds_per_step,
-        )
-        if loco_cmd is None:
-            continue
-
-        vx = float(loco_cmd["vx"])
-        vy = float(loco_cmd["vy"])
-        omega = float(loco_cmd["omega"])
-        duration = float(loco_cmd["duration"])
-
-        if dry_run:
-            print(f"[DRY-RUN] Would move: vx={vx:.2f}, vy={vy:.2f}, omega={omega:.2f}, duration={duration:.2f}s")
-            executed_any = True
-            continue
-
-        if loco_client is None:
-            print("[loco] client unavailable; skipping move command")
-            continue
-
-        code = loco_client.SetVelocity(vx, vy, omega, duration)
-        if code != 0:
-            print(f"Loco failed. code={code}, vx={vx}, vy={vy}, omega={omega}, duration={duration}")
-            continue
-
-        executed_any = True
-        print(f"Moved: vx={vx:.2f}, vy={vy:.2f}, omega={omega:.2f}, duration={duration:.2f}s")
-    return executed_any
-
 
 
 def _save_audio_response(audio_resp, out_path: Path) -> None:
