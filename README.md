@@ -10,13 +10,13 @@ List current default sink/source and available devices:
 
 ```bash
 cd high_level/g1_voice_assistant
-python3 src/step0_audio_route.py
+python3 misc/step0_audio_route.py
 ```
 
 Set explicit defaults:
 
 ```bash
-python3 src/step0_audio_route.py --sink <sink_name> --source <source_name>
+python3 misc/step0_audio_route.py --sink <sink_name> --source <source_name>
 ```
 
 ## Step 1: Push-to-Talk Mic Capture (WIP)
@@ -29,7 +29,7 @@ Current input flow:
 Run:
 
 ```bash
-python3 src/step1_arecord_test.py
+python3 misc/step1_arecord_test.py
 ```
 
 ## Step 2: Text Input -> ChatGPT -> OpenAI TTS
@@ -39,7 +39,7 @@ This skips STT for now and validates dialog + speech + gesture hooks.
 Run:
 
 ```bash
-python3 src/step2_text_chat_tts.py
+python3 src/main.py
 ```
 
 Requirements:
@@ -49,6 +49,6 @@ Requirements:
 Useful flags:
 
 ```bash
-python3 src/step2_text_chat_tts.py --no-play
-python3 src/step2_text_chat_tts.py --voice alloy
+python3 src/main.py --no-play
+python3 src/main.py --voice alloy
 ```
